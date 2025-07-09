@@ -190,3 +190,124 @@
     (ok true)
   )
 )
+
+;; Claims proportional winnings from resolved market
+(define-public (claim-winnings (market-id uint))
+  (let
+    (
+      (market (unwrap! (map-get? markets market-id) ERR_MARKET_NOT_FOUND))
+      (prediction (unwrap! (map-get? user-predictions 
+                                    {market-id: market-id, user: tx-sender}) 
+                          ERR_MARKET_NOT_FOUND))
+    )
+    
+    ;; Validate market resolution
+    (asserts! (get resolved market) ERR_MARKET_INACTIVE)
+    
+    ;; Prevent double claiming
+    (asserts! (not (get claimed prediction)) ERR_REWARDS_ALREADY_CLAIMED)
+    
+    (let
+      (
+        ;; Determine winning direction
+        (winning-prediction (if (> (get end-price market) 
+                                 (get start-price market)) 
+                              "up" 
+                              "down"))
+        
+        ;; Calculate pool totals
+        (total-stake (+ (get total-up-stake market) 
+                       (get total-down-stake market)))
+        (winning-stake (if (is-eq winning-prediction "up") 
+                        (get total-up-stake market) 
+                        (get total-down-stake market)))
+      )
+      
+      ;; Validate user prediction
+      (asserts! (is-eq (get prediction prediction) winning-prediction) 
+                ERR_INVALID_PREDICTION_TYPE)
+      
+      (let
+        (
+          ;; Calculate proportional winnings
+          (winnings (/ (* (get stake prediction) total-stake) winning-stake))
+          (fee (/ (* winnings (var-get fee-percentage)) u100))
+          (payout (- winnings fee))
+        )
+        
+        ;; Transfer payout to user
+        (try! (as-contract (stx-transfer? payout (as-contract tx-sender) 
+                                        tx-sender)))
+        
+        ;; Transfer fee to contract owner
+        (try! (as-contract (stx-transfer? fee (as-contract tx-sender) 
+                                        CONTRACT_OWNER)))
+        
+        ;; Mark as claimed
+        (map-set user-predictions {market-id: market-id, user: tx-sender}
+          (merge prediction {claimed: true})
+        )
+        
+        (ok payout)
+      )
+    )
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Retrieves comprehensive market information
+(define-read-only (get-market (market-id uint))
+  (map-get? markets market-id)
+)
+
+;; Retrieves user prediction details for specific market
+(define-read-only (get-user-prediction (market-id uint) (user principal))
+  (map-get? user-predictions {market-id: market-id, user: user})
+)
+
+;; Returns current contract STX balance
+(define-read-only (get-contract-balance)
+  (stx-get-balance (as-contract tx-sender))
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Updates oracle address for price data integration
+(define-public (set-oracle-address (new-address principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (not (is-eq new-address (var-get oracle-address))) ERR_INVALID_PARAMETERS)
+    (ok (var-set oracle-address new-address))
+  )
+)
+
+;; Updates minimum stake requirement
+(define-public (set-minimum-stake (new-minimum uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> new-minimum u0) ERR_INVALID_PARAMETERS)
+    (ok (var-set minimum-stake new-minimum))
+  )
+)
+
+;; Updates platform fee percentage
+(define-public (set-fee-percentage (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-fee u100) ERR_INVALID_PARAMETERS)
+    (ok (var-set fee-percentage new-fee))
+  )
+)
+
+;; Withdraws accumulated platform fees
+(define-public (withdraw-fees (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= amount (stx-get-balance (as-contract tx-sender))) 
+              ERR_INSUFFICIENT_FUNDS)
+    (try! (as-contract (stx-transfer? amount (as-contract tx-sender) 
+                                    CONTRACT_OWNER)))
+    (ok amount)
+  )
+)
